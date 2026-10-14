@@ -1,0 +1,11 @@
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.DS_Store
+.venv
+.mypy_cache/
+.pytest_cache/
+gis-assistant-mcp.zip
