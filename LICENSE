@@ -2,12 +2,6 @@ MIT License
 
 Copyright (c) 2026 Michael Stone
 
-This software interoperates with, and its QGIS socket client is adapted from,
-the following MIT-licensed projects, whose copyright notices are retained:
-
-    qgis_mcp — Copyright (c) 2025 Juan Santos (https://github.com/jjsantos01)
-    BlenderMCP — Copyright (c) 2025 Siddharth Ahuja (https://github.com/ahujasid)
-
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

@@ -1,0 +1,32 @@
+gis-assistant-mcp
+Copyright (c) 2026 Michael Stone
+
+This product includes software adapted from third-party projects. Their MIT
+copyright notices are retained below, as that license requires.
+
+--------------------------------------------------------------------------------
+qgis_mcp
+Copyright (c) 2025 Juan Santos
+https://github.com/jjsantos01/qgis_mcp
+Licensed under the MIT License.
+
+`src/gis_assistant/qgis_client.py` is adapted from `qgis_mcp.qgis_socket_client`.
+The adaptation is limited: 12 of the file's 113 substantive lines coincide with
+upstream, and all 12 are one-line `send_command` wrappers whose names are fixed
+by the QGIS plugin's wire protocol. The remainder — NDJSON framing, layer
+resolution, reconnection, and the deliberate omission of `execute_code` — is
+original to this project.
+
+gis-assistant-mcp is not a fork of qgis_mcp. It is a separate MCP server that
+drives the qgis_mcp QGIS plugin across that plugin's socket protocol, and it
+requires the plugin to be installed and running.
+
+--------------------------------------------------------------------------------
+BlenderMCP
+Copyright (c) 2025 Siddharth Ahuja
+https://github.com/ahujasid/blender-mcp
+Licensed under the MIT License.
+
+qgis_mcp is itself based on BlenderMCP, so its copyright notice is carried
+forward here as part of the same chain of attribution.
+--------------------------------------------------------------------------------

@@ -150,6 +150,8 @@ uv run pytest tests/ -v
 
 The QGIS socket client in this project is adapted from [qgis_mcp](https://github.com/jjsantos01/qgis_mcp) by [Juan Santos](https://github.com/jjsantos01), which is itself based on [BlenderMCP](https://github.com/ahujasid/blender-mcp) by [Siddharth Ahuja](https://x.com/sidahuj).
 
+This is not a fork of qgis_mcp. It is a separate MCP server that drives the qgis_mcp QGIS plugin across that plugin's socket protocol — 12 of `qgis_client.py`'s 113 substantive lines coincide with upstream, all of them `send_command` names fixed by the wire protocol. See [NOTICE](NOTICE) for the retained copyright notices and [ARCHITECTURE.md](ARCHITECTURE.md#development-contributions) for a capability comparison.
+
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE); third-party copyright notices are retained in [NOTICE](NOTICE).
