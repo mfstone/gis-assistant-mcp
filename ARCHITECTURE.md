@@ -46,7 +46,7 @@ The upstream [qgis_mcp](https://github.com/jjsantos01/qgis_mcp) project by Juan 
 |------------|--------------------|---------------------------------|
 | Interface | Imperative tools (one command at a time) | Natural-language prompts → multi-step plans |
 | Planning | None — user writes each step | AI planner via OpenAI Structured Outputs |
-| Safety | Code execution toggle | Algorithm allowlist (90 algorithms), path confinement, plan size limits, no execute_code |
+| Safety | Code execution toggle | Algorithm allowlist (103 algorithms), path confinement, plan size limits, no execute_code |
 | Execution | Single-command | Step-by-step with @-reference resolution, confirm/resume workflow |
 | Error handling | Per-command | Fail-fast with diagnostics (`gis.diagnose`), resumable after confirm |
 | Transports | MCP/stdio only | MCP/stdio + HTTP API (dual transport) |
