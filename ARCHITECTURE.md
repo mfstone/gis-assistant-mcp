@@ -14,14 +14,14 @@ QGIS Chat UI ──HTTP/REST──▶│      │  ┌────────�
                             │      │  │ Planner │──▶│  Executor  │──┼─────▶│  QGIS Plugin     │
                             │      │  └────┬────┘   └──────┬─────┘  │      │  Socket Server   │
                             │      │       │               │        │      │  (TCP/NDJSON     │
-                            │      │  [OpenAI API]    [Safety       │      │   port 9876)     │
+                            │      │ [Claude/OpenAI]  [Safety       │      │   port 9876)     │
                             │      │  Structured      Validation]   │      └──────────────────┘
                             │      │  Outputs                       │
                             └──────┤                                 │
                                     └─────────────────────────────────┘
 ```
 
-**Data flow:** User prompt → transport layer → GISEngine → OpenAI planner (generates GISPlan) → safety validation (algorithm allowlist, path confinement) → PlanExecutor (resolves @-references, runs steps) → QGISClient (TCP/NDJSON commands) → QGIS plugin socket server → QGIS Processing algorithms → results returned up the chain.
+**Data flow:** User prompt → transport layer → GISEngine → planner (Claude or OpenAI, generates GISPlan) → safety validation (algorithm allowlist, path confinement) → PlanExecutor (resolves @-references, runs steps) → QGISClient (TCP/NDJSON commands) → QGIS plugin socket server → QGIS Processing algorithms → results returned up the chain.
 
 Two transport layers share the same core engine:
 
@@ -45,34 +45,48 @@ The upstream [qgis_mcp](https://github.com/jjsantos01/qgis_mcp) project by Juan 
 | Capability | qgis_mcp (upstream) | gis-assistant-mcp (this project) |
 |------------|--------------------|---------------------------------|
 | Interface | Imperative tools (one command at a time) | Natural-language prompts → multi-step plans |
-| Planning | None — user writes each step | AI planner via OpenAI Structured Outputs |
+| Planning | None — user writes each step | AI planner via Claude or OpenAI structured outputs |
 | Safety | Code execution toggle | Algorithm allowlist (103 algorithms), path confinement, plan size limits, no execute_code |
 | Execution | Single-command | Step-by-step with @-reference resolution, confirm/resume workflow |
 | Error handling | Per-command | Fail-fast with diagnostics (`gis.diagnose`), resumable after confirm |
 | Transports | MCP/stdio only | MCP/stdio + HTTP API (dual transport) |
 | UI | External (Claude Desktop) | Built-in QGIS chat dock widget |
-| Tests | None | 44 tests across 4 test modules |
+| Tests | None | 78 tests across 5 test modules |
 
 ---
 
 ## Core Components
 
-### `engine.py` — GISEngine (362 lines)
+### `engine.py` — GISEngine (354 lines)
 
 Central orchestrator shared by both transports. All public methods return dicts; JSON serialization happens at the transport boundary.
 
 - **Lazy initialization**: `_get_client()`, `_get_planner()`, `_get_executor()` create components on first use
 - **Context gathering**: `_gather_context()` snapshots QGIS state (project info, layers, CRS) for the planner. Tolerates QGIS being unreachable (returns partial context with error info)
-- **Thread safety**: Narrow `threading.Lock()` protects only shared mutable state (`_last_plan`, `_last_report`, `_pending_prompt`, `_pending_context`). Network calls (OpenAI, QGIS socket) run outside the lock to avoid deadlocks
+- **Thread safety**: Narrow `threading.Lock()` protects only shared mutable state (`_last_plan`, `_last_report`, `_pending_prompt`, `_pending_context`). Network calls (the model provider, QGIS socket) run outside the lock to avoid deadlocks
+- **One provider per process**: `diagnose()` borrows the planner's provider rather than building its own, so a single env var governs both call sites and a diagnosis can never silently come from a different vendor than the plan it explains
 - **Public API**: `plan()`, `answer()`, `run()`, `run_plan()`, `resume()`, `diagnose()`, `explain_last_run()`, `list_capabilities()`, `qgis_status()`
 
-### `planner.py` — GISPlanner (64 lines)
+### `llm.py` — provider seam (312 lines)
 
-Calls OpenAI's Structured Outputs API (`client.beta.chat.completions.parse()`) with `response_format=GISPlan` to generate validated plan objects from natural language + QGIS context.
+Two call shapes cover everything the engine needs, so neither vendor's API leaks past this module:
 
-- Model: `gpt-4o` (configurable via `GIS_PLANNER_MODEL` env var)
+- `generate_structured(system, user, schema)` — plan generation against a Pydantic schema
+- `complete_text(system, user)` — free-form error diagnosis
+
+`AnthropicProvider` (default) uses `messages.parse()` with `output_format=GISPlan` and adaptive thinking; `OpenAIProvider` uses `beta.chat.completions.parse()` with `response_format=GISPlan`. Each SDK is imported **inside** its provider, so only the one you select has to be installed.
+
+- **Selection**: `GIS_PLANNER_PROVIDER` (`anthropic` | `openai`, plus aliases), default `anthropic`; `GIS_PLANNER_MODEL` overrides the per-provider default
+- **Stale-model guard**: the default provider changed from OpenAI to Claude, so an environment still exporting `GIS_PLANNER_MODEL=gpt-4o` would have sent that name to Anthropic and returned a bare 404. A mismatch between provider and model family is logged as an actionable warning instead
+- **Error translation**: both SDKs raise the same five failure shapes under different class names. `_translate_errors` maps them most-specific-first onto one `LLMError` with an actionable message; anything unrecognised propagates unchanged, so a bug never masquerades as an API failure
+
+### `planner.py` — GISPlanner (80 lines)
+
+Builds the prompt and delegates the call to the provider. Holds no vendor-specific code.
+
 - Returns `GISPlan` with status `"ready"` or `"needs_clarification"` (with questions for the user)
 - Clarification answers are fed back in via `answers` parameter for re-planning
+- Exposes `.provider` so the engine's diagnosis path reuses the same client
 
 ### `executor.py` — PlanExecutor (375 lines)
 
@@ -102,7 +116,7 @@ TCP socket wrapper using NDJSON framing (newline-delimited JSON, protocol versio
 ### `schemas.py` — Pydantic Models (179 lines)
 
 - **GISPlan**: Complete workflow plan (status, questions, inputs, outputs, assumptions, steps)
-- **PlanStep**: Single step with operation type, algorithm, parameters (JSON string for OpenAI strict mode compatibility), layer paths, render settings
+- **PlanStep**: Single step with operation type, algorithm, parameters (JSON string for provider strict-mode compatibility), layer paths, render settings
 - **RunReport**: Execution results (resume token, step results, outputs created, warnings, success/blocked status)
 - **Supporting models**: ClarificationQuestion, InputLayer, OutputFile, PlanOutputs, Assumption, StepResult
 
@@ -130,7 +144,7 @@ Dock widget with full chat UI and subprocess engine management.
 
 **UI layout** (top to bottom):
 1. Dual status indicators (API: green/red, QGIS Runtime: green/red)
-2. Connection settings (URL, token, engine directory, OpenAI key)
+2. Connection settings (URL, token, engine directory, provider API key)
 3. Engine controls (Start/Stop Engine, Connect)
 4. Mode selector (Plan Only / Plan + Execute)
 5. Chat history (QTextBrowser with styled HTML)
@@ -139,7 +153,7 @@ Dock widget with full chat UI and subprocess engine management.
 
 **Engine subprocess management**:
 - Launches `gis-assistant-api` via `QProcess` using `uv --directory <path> run gis-assistant-api`
-- Injects `OPENAI_API_KEY` via `QProcessEnvironment`
+- Injects the provider API key (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) via `QProcessEnvironment`
 - Captures API token from stdout (`GIS_API_TOKEN=<token>` line)
 - Graceful shutdown: `terminate()` → 3s wait → `kill()` if needed
 
@@ -167,9 +181,9 @@ Non-blocking HTTP client using Qt's `QNetworkAccessManager`.
 
 **Dicts at engine boundary.** GISEngine methods return plain dicts. JSON serialization (`json.dumps()`) happens only in the transport wrappers (MCP tools, HTTP endpoints). This avoids double parse/serialize and makes the engine directly testable.
 
-**Narrow lock scope.** The engine's `threading.Lock()` protects only shared mutable state mutations (4 fields). Network calls to OpenAI and the QGIS socket run outside the lock, preventing deadlocks when long-running requests overlap with heartbeat checks.
+**Narrow lock scope.** The engine's `threading.Lock()` protects only shared mutable state mutations (4 fields). Network calls to the model provider and the QGIS socket run outside the lock, preventing deadlocks when long-running requests overlap with heartbeat checks.
 
-**Parameters as JSON string.** OpenAI's Structured Outputs strict mode requires `additionalProperties: false` on all object schemas. A free-form `dict[str, object]` for algorithm parameters can't satisfy this constraint. The solution: `parameters` is a `str` field containing a JSON-encoded object. The planner outputs the JSON string; the executor calls `parsed_parameters()` to get the dict. The system prompt explicitly documents this encoding and warns about integer enum requirements.
+**Parameters as JSON string.** Provider strict modes (OpenAI Structured Outputs, and Anthropic's `strict` schemas) require `additionalProperties: false` on all object schemas. A free-form `dict[str, object]` for algorithm parameters can't satisfy this constraint. The solution: `parameters` is a `str` field containing a JSON-encoded object. The planner outputs the JSON string; the executor calls `parsed_parameters()` to get the dict. The system prompt explicitly documents this encoding and warns about integer enum requirements.
 
 **QNetworkAccessManager for non-blocking UI.** All HTTP communication from the QGIS plugin uses Qt's native async networking. No threads, no `asyncio`, no event loop conflicts. Requests fire immediately; results arrive via Qt signals on the main thread.
 
@@ -214,21 +228,23 @@ coincide with upstream for that reason, and the file says so in its docstring.
 
 | Module | Lines | Description |
 |--------|-------|-------------|
-| `engine.py` | 362 | Core GISEngine orchestrator with thread-safe state management |
 | `executor.py` | 377 | Step-by-step plan execution with @-reference resolution and confirm/resume |
+| `engine.py` | 354 | Core GISEngine orchestrator with thread-safe state management |
+| `llm.py` | 312 | Provider seam — Claude (default) and OpenAI behind one Protocol |
 | `api.py` | 238 | Starlette HTTP API with bearer token auth and 10 REST endpoints |
 | `qgis_client.py` | 216 | TCP/NDJSON socket client with layer resolution and reconnection |
 | `safety.py` | 198 | Algorithm allowlist (103 algorithms), path confinement, plan limits |
 | `schemas.py` | 187 | Pydantic models for GISPlan, RunReport, and supporting types |
 | `prompts.py` | 168 | LLM system prompts with CRS/unit awareness and parameter type guidance |
 | `server.py` | 157 | MCP/stdio transport — thin wrappers around GISEngine |
-| `planner.py` | 64 | Structured-output LLM integration for plan generation |
-| **Source total** | **1,967** | |
+| `planner.py` | 80 | Prompt assembly; delegates the model call to `llm.py` |
+| **Source total** | **2,287** | |
+| `test_llm.py` | 345 | 21 tests: provider selection, model resolution, refusal and error translation |
 | `test_executor.py` | 301 | 13 tests: confirm/resume, reference resolution, error handling |
-| `test_safety.py` | 114 | 15 tests: algorithm validation, path escape prevention |
 | `test_qgis_client.py` | 129 | 11 tests: layer resolution, directory scanning |
+| `test_safety.py` | 114 | 15 tests: algorithm validation, path escape prevention |
 | `test_schemas.py` | 106 | 6 tests: model validation, serialization round-trips |
-| **Test total** | **650** | **45 tests** |
+| **Test total** | **995** | **78 tests** (72 + 6 skipped without the openai extra) |
 
 Counts above were verified with `pytest -q` and `wc -l src/gis_assistant/*.py`.
 Re-run those rather than trusting this table.
@@ -259,7 +275,7 @@ Re-run those rather than trusting this table.
 
 | Category | Lines |
 |----------|-------|
-| gis-assistant-mcp source | 1,947 |
+| gis-assistant-mcp source | 2,287 |
 | gis-assistant-mcp tests | 636 |
 | QGIS plugin additions | ~877 |
 | **Total new code** | **~3,460** |
@@ -279,7 +295,8 @@ Re-run those rather than trusting this table.
 | Package | Version | Purpose |
 |---------|---------|---------|
 | mcp[cli] | >=1.3.0 | Model Context Protocol SDK |
-| openai | >=1.30.0 | OpenAI Structured Outputs API |
+| anthropic | >=1.0.0 | Claude Messages API — `messages.parse` structured outputs (default provider) |
+| openai | >=1.30.0 | *Optional extra* (`uv sync --extra openai`) — alternative provider |
 | pydantic | >=2.0.0 | Data validation and schema generation |
 | starlette | >=0.37.0 | HTTP API framework |
 | anyio | >=4.0 | Async-to-sync bridge for blocking engine calls |

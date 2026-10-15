@@ -195,8 +195,6 @@ class GISEngine:
 
     def diagnose(self, error_text: str) -> dict:
         """Diagnose a GIS/QGIS error and suggest fixes."""
-        from openai import OpenAI
-
         context: dict = {}
         try:
             context = self._gather_context()
@@ -208,19 +206,13 @@ class GISEngine:
             error_text=error_text, context_json=context_json
         )
 
-        client = OpenAI()
-        model = os.environ.get("GIS_PLANNER_MODEL", "gpt-4o")
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": DIAGNOSE_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
+        # Same provider the planner uses, so one env var controls both call
+        # sites and a diagnosis never silently comes from a different vendor.
+        diagnosis = self._get_planner().provider.complete_text(
+            system=DIAGNOSE_SYSTEM_PROMPT, user=user_prompt
         )
 
-        return {
-            "diagnosis": completion.choices[0].message.content or "No diagnosis available."
-        }
+        return {"diagnosis": diagnosis or "No diagnosis available."}
 
     def explain_last_run(self) -> dict:
         """Show details of the last plan and/or execution run."""

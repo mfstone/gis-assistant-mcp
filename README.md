@@ -12,7 +12,7 @@ Claude Code  ──MCP/stdio──▶                       │                 
                             gis-assistant engine ──┤ TCP/NDJSON ──▶ QGIS Plugin
 QGIS Chat UI ──HTTP────────▶                      │                  │
                                     │              └──────────────────┘
-                                    ├── OpenAI (plan generation)
+                                    ├── Claude or OpenAI (plan generation)
                                     └── Local safety validation
 ```
 
@@ -21,7 +21,7 @@ Two transport options share the same core engine:
 - **MCP/stdio** (`gis-assistant`): For Claude Code or any MCP client. Runs as a stdio server.
 - **HTTP API** (`gis-assistant-api`): For the QGIS chat dock widget. Runs as a local HTTP server on port 8100 with bearer token auth.
 
-Both transports call the same `GISEngine` class, which generates plans via OpenAI Structured Outputs, validates them against an algorithm allowlist and path confinement rules, then executes each step by sending commands to the QGIS MCP plugin over a TCP socket.
+Both transports call the same `GISEngine` class, which generates plans through a provider's structured-output API, validates them against an algorithm allowlist and path confinement rules, then executes each step by sending commands to the QGIS MCP plugin over a TCP socket.
 
 ## Prerequisites
 
@@ -30,13 +30,15 @@ Both transports call the same `GISEngine` class, which generates plans via OpenA
   drives that plugin over its socket protocol; see [Acknowledgments](#acknowledgments)
 - **Python 3.10+**
 - **[uv](https://docs.astral.sh/uv/)** package manager
-- **OpenAI API key** (`OPENAI_API_KEY` environment variable)
+- **`ANTHROPIC_API_KEY`** — Claude is the default provider. (OpenAI is an
+  optional alternative; see [Choosing a provider](#choosing-a-provider).)
 
 ## Installation
 
 ```bash
 cd /path/to/gis-assistant-mcp
-uv sync
+uv sync                      # Claude (default)
+uv sync --extra openai       # ...or add the optional OpenAI provider
 ```
 
 ## Configuration
@@ -45,11 +47,70 @@ uv sync
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENAI_API_KEY` | *(required)* | OpenAI API key for plan generation |
-| `GIS_PLANNER_MODEL` | `gpt-4o` | OpenAI model for planning and diagnostics |
+| `GIS_PLANNER_PROVIDER` | `anthropic` | `anthropic` (aliases: `claude`) or `openai` (aliases: `chatgpt`, `gpt`) |
+| `ANTHROPIC_API_KEY` | *(required for Claude)* | Read by the Anthropic SDK |
+| `OPENAI_API_KEY` | *(required for OpenAI)* | Read by the OpenAI SDK. Needs the `openai` extra installed |
+| `GIS_PLANNER_MODEL` | per provider | Overrides the provider default — `claude-opus-5` or `gpt-4o`. Must match the selected provider; a mismatch is logged as a warning |
 | `GIS_WORKSPACE` | `~/gis-workspace` | Output directory (all outputs confined here) |
 | `GIS_API_PORT` | `8100` | Port for the HTTP API server |
 | `GIS_API_TOKEN` | *(auto-generated)* | Bearer token for HTTP API auth. If unset, a random token is generated at startup and printed to stdout. |
+
+### Choosing a provider
+
+Claude (`claude-opus-5`) is the default and needs no extra install. To use OpenAI
+instead:
+
+```bash
+uv sync --extra openai
+export GIS_PLANNER_PROVIDER=openai OPENAI_API_KEY=...
+```
+
+Both providers go through the same two-method seam in `llm.py`, so the engine
+holds no vendor-specific code and switching changes no behaviour beyond the model.
+
+**On token usage.** Adaptive thinking is enabled on both Claude call paths. Plan
+generation genuinely needs it — the model has to reason about CRS and units,
+choose among 103 allowed algorithms, and chain one step's outputs into the next —
+but every request then spends reasoning tokens on top of the response, and that
+applies to error diagnosis too, not just planning.
+
+This server calls the **Anthropic API** with an `ANTHROPIC_API_KEY`, billed per
+token. A Claude Pro or Max subscription covers Claude apps such as Claude Code and
+claude.ai, but not API usage — the two are separate and metered differently.
+
+Measured input for a typical request is ~1,900 tokens (system prompt 1,621 + a
+six-layer project context). With output and thinking estimated at 1.8–5.8k tokens:
+
+| Model | Cost per plan | Plans per $1 |
+|-------|---------------|--------------|
+| `claude-opus-5` (default) | $0.05 – $0.15 | 6 – 18 |
+| `claude-sonnet-5` | ~$0.03 | ~32 |
+| `claude-haiku-4-5` | ~$0.02 | ~63 |
+
+To spend less: set `GIS_PLANNER_MODEL` to a cheaper model, or drop `thinking` from
+`AnthropicProvider` in `src/gis_assistant/llm.py`.
+
+### Running without an API key
+
+Only plan *generation* needs a model. The execution engine does not, and because
+the planner is constructed lazily, no key is read unless you call a planning tool:
+
+| Needs a key | No key required |
+|-------------|-----------------|
+| `gis.plan`, `gis.answer`, `gis.run`, `gis.diagnose` | `gis.run_plan`, `gis.resume`, `gis.list_capabilities`, `gis.explain_last_run`, `gis.qgis_status` |
+
+So an MCP client that is *already* a model — Claude Code, for instance — can skip
+the built-in planner entirely: call `gis.list_capabilities` to learn the allowed
+operations and limits, author the plan JSON itself, then hand it to `gis.run_plan`.
+Safety validation, path confinement, @-reference resolution and the confirm/resume
+gate all still apply, because they live in the executor rather than the planner.
+The internal planner exists for the QGIS chat dock, which has no model of its own.
+
+The test suite needs no key and makes no network calls at all:
+
+```bash
+uv sync && uv run pytest -q     # 72 passed, 6 skipped
+```
 
 ### MCP Client Setup (Claude Code)
 
@@ -123,7 +184,7 @@ Error responses use a consistent envelope: `{"status": "error", "message": "..."
 ## Safety
 
 - **No `execute_code`**: Arbitrary Python execution is intentionally excluded.
-- **Algorithm allowlist**: Only approved `native:` and `gdal:` processing algorithms can run (~90 algorithms).
+- **Algorithm allowlist**: Only approved `native:` and `gdal:` processing algorithms can run (103 algorithms).
 - **Path confinement**: All output paths are resolved and validated to stay within the workspace directory.
 - **Confirmation steps**: Plans include `confirm` steps before overwriting existing files, which halt execution until approved via `gis.resume`.
 - **Plan size limits**: Maximum 20 steps per plan.

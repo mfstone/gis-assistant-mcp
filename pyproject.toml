@@ -9,14 +9,22 @@ authors = [
 ]
 dependencies = [
     "mcp[cli]>=1.3.0",
-    "openai>=1.30.0",
+    "anthropic>=1.0.0",
     "pydantic>=2.0.0",
     "starlette>=0.37.0",
     "anyio>=4.0",
     "uvicorn>=0.30.0",
 ]
 
+[project.optional-dependencies]
+# Claude is the default provider and needs nothing extra. Install this only to
+# run with GIS_PLANNER_PROVIDER=openai:  uv sync --extra openai
+openai = ["openai>=1.30.0"]
+
 [dependency-groups]
+# Deliberately Claude-only: the OpenAI-specific tests skip themselves when the
+# extra is absent, which is what proves the extra is genuinely optional. To
+# exercise them:  uv sync --extra openai
 dev = ["pytest>=8.0"]
 
 [build-system]
